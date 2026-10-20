@@ -25,7 +25,7 @@ base_config.DATA.BATCH_SIZE = 128
 # Path to dataset, could be overwritten by command line argument
 base_config.DATA.DATA_PATH = ""
 # Dataset name
-base_config.DATA.DATASET = "cifar"
+base_config.DATA.DATASET = "cifar10"
 # Input image size
 base_config.DATA.IMG_SIZE = 224
 # Interpolation to resize image (random, bilinear, bicubic)
@@ -60,8 +60,10 @@ base_config.TRAIN.START_EPOCH = 0
 base_config.TRAIN.EPOCHS = 300
 base_config.TRAIN.WARMUP_EPOCHS = 20
 base_config.TRAIN.LR = 5e-4
-base_config.TRAIN.MIN_LR = 5e-4
-base_config.TRAIN.WARMUP_LR = 5e-4
+base_config.TRAIN.MIN_LR = 5e-6
+base_config.TRAIN.WARMUP_LR = 5e-7
+base_config.TRAIN.WEIGHT_DECAY = 0.05
+base_config.TRAIN.EARLY_STOPPING_PATIENCE = 0
 
 # Gradient accumulation steps
 # could be overwritten by command line argument
@@ -89,6 +91,7 @@ base_config.AUG = CN()
 base_config.AUG.COLOR_JITTER = 0.4
 # Use AutoAugment policy. "v0" or "original"
 base_config.AUG.RAND_AUGMENT = "rand-m9-mstd0.5-inc1"
+base_config.AUG.SCHEME = 'baseline'
 
 # -----------------------------------------------------------------------------
 # Testing settings
@@ -113,6 +116,8 @@ base_config.PRINT_FREQ = 10
 base_config.SEED = 0
 # Perform evaluation only, overwritten by command line argument
 base_config.EVAL_MODE = False
+
+base_config.SAVE_CKPT = True
 
 
 def _update_config_from_file(config, cfg_file):

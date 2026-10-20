@@ -5,6 +5,9 @@ import os
 import shutil
 import time
 
+import wandb
+import yaml
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,7 +35,7 @@ def parse_option():
     parser.add_argument("--resume", help="resume from checkpoint")
     parser.add_argument(
         "--output",
-        default="output",
+        default=None,
         type=str,
         metavar="PATH",
         help="root of output folder, the full path is <output>/<model_name>/<tag> (default: output)",
@@ -51,7 +54,7 @@ def main(config):
     dataset_train, dataset_val, dataset_test, data_loader_train, data_loader_val, data_loader_test = build_loader(
         config
     )
-    device = "cpu"
+    device = "cuda" # bug: not cpu
     model = build_model(config)
     # logger.info(str(model))
 
@@ -68,6 +71,17 @@ def main(config):
     logger.info(flop_count_str(flops))
     logger.info('number of params: {} M'.format(n_parameters / 1e6))
     logger.info(f'flops: {n_flops/1e6} MFLOPS')
+    wandb.init(
+        entity="arjundesikan2008-na",
+        project="nmep-hw3",
+        name=os.path.relpath(config.OUTPUT, "output"),
+        config=yaml.safe_load(config.dump()),
+        tags=[config.MODEL.NAME, config.DATA.DATASET]
+    )
+    wandb.define_metric("val/acc", summary="max")
+    wandb.define_metric("val/loss", summary="min")
+    wandb.define_metric("throughput_per_s", summary="mean")
+    wandb.define_metric("epoch_time_s", summary="mean")
 
     # Keep it simple with basic epoch scheduler
     optimizer = build_optimizer(config, model)
@@ -75,6 +89,10 @@ def main(config):
     lr_scheduler = CosineAnnealingLR(optimizer, config.TRAIN.EPOCHS)
 
     max_accuracy = 0.0
+
+    if config.TRAIN.EARLY_STOPPING_PATIENCE:
+        patience = config.TRAIN.EARLY_STOPPING_PATIENCE
+        epochs_without_improvement = 0
 
     if config.MODEL.RESUME:
         max_accuracy = load_checkpoint(config, model, optimizer, lr_scheduler, logger)
@@ -86,7 +104,11 @@ def main(config):
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
+        epoch_start = time.time()
         train_acc1, train_loss = train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch)
+        epoch_time = time.time() - epoch_start
+        current_lr = optimizer.param_groups[0]["lr"]
+        lr_scheduler.step() # bug: forgot to add this after training one epoch
         logger.info(f" * Train Acc {train_acc1:.3f} Train Loss {train_loss:.3f}")
         logger.info(f"Accuracy of the network on the {len(dataset_train)} train images: {train_acc1:.1f}%")
 
@@ -95,9 +117,14 @@ def main(config):
         logger.info(f" * Val Acc {val_acc1:.3f} Val Loss {val_loss:.3f}")
         logger.info(f"Accuracy of the network on the {len(dataset_val)} val images: {val_acc1:.1f}%")
 
-        if epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1):
-            save_checkpoint(config, epoch, model, max_accuracy, optimizer, lr_scheduler, logger)
+        # implement early stopping? 
+        if val_acc1 <= max_accuracy and config.TRAIN.EARLY_STOPPING_PATIENCE:
+            epochs_without_improvement += 1
 
+        if config.SAVE_CKPT and val_acc1 > max_accuracy:
+            save_checkpoint(config, epoch, model, val_acc1, optimizer, lr_scheduler, logger)
+            epochs_without_improvement = 0
+        
         max_accuracy = max(max_accuracy, val_acc1)
         logger.info(f"Max accuracy: {max_accuracy:.2f}%\n")
 
@@ -109,14 +136,37 @@ def main(config):
                 os.path.join(config.OUTPUT, "metrics.json"), mode="a", encoding="utf-8"
             ) as f:
                 f.write(json.dumps(log_stats) + "\n")
+        
+        wandb.log({
+            "epoch": epoch,
+            "train/acc": train_acc1,
+            "train/loss": train_loss,
+            "val/acc": val_acc1,
+            "val/loss": val_loss,
+            "lr": current_lr,
+            "epoch_time_s": epoch_time,
+            "throughput_img_per_s": len(dataset_train) / epoch_time,
+        }, step=epoch)
+
+        if config.TRAIN.EARLY_STOPPING_PATIENCE and epochs_without_improvement >= patience:
+            logger.info(f"EARLY STOPPING at Epoch {epoch}.")
+            break
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info("Training time {}".format(total_time_str))
+    wandb.summary["total_train_time_s"] = total_time
 
     logger.info("Start testing")
-    preds = evaluate(config, data_loader_test, model)
+
+    # load the best model for evaluation
+    ckpt_path = os.path.join(config.OUTPUT, "ckpt_best.pth")
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model"])
+
+    preds = evaluate(config, data_loader_test, model)   
     np.save(os.path.join(config.OUTPUT, "preds.npy"), preds)
+    wandb.finish()
 
 
 def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch):
